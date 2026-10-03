@@ -33,6 +33,7 @@
 # Usage: ./deploy.sh [--host <console>] [--ftp-port 2121] [--elf-port 9021]
 #                    [--quit-file]
 #        ./deploy.sh --print-toolchain    # resolve the toolchain and say which
+#        ./deploy.sh --elf PATH           # deploy a prebuilt ELF, build nothing
 #
 # The console address is resolved in this order, first answer wins:
 #   --host, then $PS5_HOST, then [console] host in the config file below.
@@ -80,6 +81,7 @@ ELF="$SRC/dump_monitor_v1.0.elf"
 # old path for a monitor whose IPMI side never came up.
 SKIP_QUIT=1
 PRINT_TOOLCHAIN=0
+ELF_OVERRIDE=""
 
 # THE TOOLCHAIN IS RESOLVED THREE WAYS, because this builds on NixOS and on an
 # ordinary distro and the two keep LLVM 18 nowhere near each other.
@@ -192,6 +194,12 @@ while [ $# -gt 0 ]; do
         # Resolve and report, build nothing, talk to no console. This is what
         # CI runs to keep the non-nix cases honest without a PS5 attached.
         --print-toolchain) PRINT_TOOLCHAIN=1; shift ;;
+        # Deploy an ELF built somewhere else -- a CI artefact, or a release
+        # asset someone downloaded -- with no toolchain here at all. The
+        # handover and the verification are identical; only the build is
+        # skipped, so this is the honest way to test that what CI produces
+        # actually runs, rather than testing a local rebuild of the same source.
+        --elf) ELF_OVERRIDE="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -221,11 +229,21 @@ if [ -z "$HOST" ]; then
     exit 2
 fi
 
-resolve_toolchain || refuse_toolchain
-say_toolchain
+if [ -n "$ELF_OVERRIDE" ]; then
+    if [ ! -f "$ELF_OVERRIDE" ]; then
+        echo "no such ELF: $ELF_OVERRIDE" >&2
+        exit 2
+    fi
+    ELF="$ELF_OVERRIDE"
+    echo "==> prebuilt ELF, nothing is built here: $ELF"
+    echo "    $(wc -c < "$ELF") bytes"
+else
+    resolve_toolchain || refuse_toolchain
+    say_toolchain
 
-echo "==> building"
-run_make
+    echo "==> building"
+    run_make
+fi
 
 # THE PRIMARY STOP AGAIN, not a legacy step. It was demoted on 2026-08-14 when
 # the IPMI handover landed, and un-demoted on 2026-08-19 when that handover was
