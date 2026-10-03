@@ -1,0 +1,89 @@
+# dump_monitor runtime config example
+# Place as: /data/coredumps/config.ini
+#
+# This file is a template.
+# Nothing below is active until you remove the leading '#'.
+#
+# How to use this file:
+# 1. Uncomment only the parameters you really want to override.
+# 2. Lines that start with '# key=value' are real parameters you can uncomment directly.
+# 3. Flat key=value only -- there are no [section] headers.
+# 4. '#' and ';' start a comment anywhere on a line.
+
+# GOT snapshot:
+# 1/true/yes/on  -> keep a rolling snapshot of the GOT of EVERY module the
+#                   running game has mapped, and attach it to any coredump
+# 0/false/no/off -> capture coredumps only, do no cross-process reads at all
+#
+# Every mapped module is captured, not just the eboot: a title that loads an
+# older system library and calls a NID that library does not export cannot be
+# diagnosed unless that library's own GOT was captured too.
+# Default: 1
+# got_snapshot=1
+
+# Mirror every file from a coredump folder to /data, not just the crash dump:
+# 1/true/yes/on  -> copy the whole folder
+# 0/false/no/off -> copy only *.prosperodmp
+#
+# The default set is the crash dump plus the GPU crash-analysis files:
+#   *.prosperodmp  *.prosperogpuextdmp  *.prosperodmpmanifest  (+ s-prefixed)
+# Names taken from the firmware's coredump.elf format strings.
+#
+# Not copied by default: the crash video and screenshot (large, never read),
+# and the *.prosperomemdmp / *.prosperousermemfile memory images, which can be
+# very large and nothing reads back today.
+#
+# Set mirror_all=1 to copy the whole folder including those.
+# Default: 0
+# mirror_all=0
+
+# How often to look for a running game (milliseconds), range: 20..60000
+#
+# This is one KERN_PROC_PROC sysctl -- no cross-process read, no credential
+# flip -- so it is cheap to run several times a second. It has to be: a title
+# that crashes during boot may exist for only a second or two, and a poll that
+# is too slow will first see the process after it has already died. A 2 s poll
+# missed one entirely on hardware.
+# Default: 200
+# detect_poll_ms=200
+
+# Settle delay after a game process is first seen, before a snapshot is taken
+# (milliseconds), range: 0..60000
+#
+# This is the tradeoff for a title that dies during boot: waiting lets the game
+# finish mapping its modules, but wait longer than the process lives and there
+# is nothing left to read. Lower it if captures come back empty; raise it if
+# they come back with fewer modules than the game really loaded.
+# Default: 500
+# delay_ms=500
+
+# Settle delay is now a FLOOR, not the trigger: after it, the payload polls the
+# vm_map until the module count stops growing. Shortening it does not buy an
+# earlier capture of a loaded title -- it only risks sweeping one that has
+# barely started.
+
+# Re-sweep briskly for this long after the first capture (seconds), 0..600
+#
+# A title is still mapping modules for the first seconds of its life, so
+# quiescence can settle on a lull rather than the real set. This window picks up
+# the late arrivals. Raise it for a title that loads slowly.
+# Default: 10
+# got_resweep_window_sec=10
+
+# Steady-state re-sweep of a live game (seconds), 0 = off, 0..3600
+#
+# Off by default. Measured at crash time, 0 of 8 module tails differed from the
+# launch capture -- GOT slots included -- so sweeping for the rest of a session
+# re-reads data that does not change. Turn it on only if a title is found to map
+# modules long after boot.
+# Default: 0
+# got_resweep_sec=0
+
+# Refresh the capture from the still-live process when the crash folder appears
+#
+# The crashing process stays readable while its coredump is written (~10s), so
+# this takes the freshest possible capture. If the sweep fails or comes back
+# with fewer modules, the held capture is written instead -- a complete capture
+# is never replaced by a partial or smaller one.
+# Default: 1
+# got_crash_sweep=1

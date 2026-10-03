@@ -1,0 +1,13 @@
+# Build output -- the ELF is reproducible from source via the Makefile.
+*.elf
+*.o
+
+# Records the DIAG value the current ELF was built with, so switching it
+# forces a rebuild. Local build state, not source.
+.build-flags
+
+# The live config is per-console; config.ini.example is the tracked template.
+config.ini
+
+# Claude Code local settings -- covered only by the global gitignore otherwise.
+.claude/settings.local.json

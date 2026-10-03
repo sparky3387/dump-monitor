@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Build
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+
+jobs:
+  build:
+    # PINNED, not `ubuntu-latest`. That label migrates to a newer Ubuntu on its
+    # own schedule and would move LLVM out from under the toolchain step with
+    # no commit here to explain it. Bump this deliberately.
+    runs-on: ubuntu-24.04
+    steps:
+      # A shallow clone is enough: VERSION comes from the Makefile, not from
+      # `git describe`, so there is nothing here that needs tags.
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Checkout pacbrew-repo
+        uses: actions/checkout@v7
+        with:
+          repository: ps5-payload-dev/pacbrew-repo
+          path: pacbrew-repo
+
+      - name: Install host toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang-18 \
+            cmake \
+            curl \
+            libarchive-tools \
+            lld-18 \
+            makepkg \
+            pacman-package-manager \
+            pkg-config \
+            python3
+
+      # The SDK package only. The payload's C++ is structural -- an IPMI
+      # EventHandler subclass -- and it is built -fno-exceptions -fno-rtti and
+      # LINKED WITH $(CC) precisely so no C++ runtime is needed, so the
+      # pacbrew libcxx package is not installed here. If a link ever asks for
+      # -lc++ something has started pulling in the STL; fix that, do not add
+      # the package to hide it.
+      - name: Build the PS5 payload SDK
+        working-directory: pacbrew-repo/sdk
+        run: |
+          makepkg -c -f
+          sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
+
+      # THIS REPO DOES FIX UP PATH, unlike the sibling library whose build.sh
+      # resolves the toolchain itself and is tested by NOT fixing it. Here the
+      # build is plain `make`, and the SDK's prospero-* wrappers exec an
+      # UNVERSIONED clang / ld.lld / llvm-config. apt installs those names only
+      # under /usr/lib/llvm-18/bin, so without this the SDK wrapper fails as
+      # `clang: No such file or directory` and nothing says why.
+      - name: Put the unversioned LLVM 18 names on PATH
+        run: |
+          test -x /usr/lib/llvm-18/bin/clang
+          test -x /usr/lib/llvm-18/bin/ld.lld
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+
+      # A WRAPPED clang builds the SDK cleanly and kills the payload on
+      # hardware, so this is checked here rather than trusted. libc's raw
+      # syscall stubs end in a hand-written `ret` inside inline asm, which is
+      # correct only while no frame-pointer prologue is emitted; a wrapper that
+      # forces one on turns every stub into `push %rbp; mov %rsp,%rbp; ... ret`
+      # and the `ret` pops the saved frame pointer instead of the return
+      # address. The process then takes SIGSEGV on an instruction fetch before
+      # it can log a thing.
+      #
+      # Must be 0. A poisoned build prints 233, one per stub. The member has to
+      # be extracted to a file first -- objdump cannot read stdin, and piping
+      # it in makes the grep count nothing and the check pass either way.
+      - name: Verify the SDK's syscall stubs
+        run: |
+          set -eux
+          ar p "$PS5_PAYLOAD_SDK/target/lib/libc.a" syscalls.o > stubs.o
+          count=$(objdump -d stubs.o | grep -c 'push   %rbp' || true)
+          rm -f stubs.o
+          echo "frame-pointer prologues in libc's syscall stubs: $count"
+          test "$count" = 0
+
+      - name: Build
+        run: |
+          set -eux
+          make
+          mkdir -p out
+          cp dump_monitor_v*.elf out/
+
+      # DIAG=1 compiles the one-shot vm_map / module-base dump, which is behind
+      # #ifdef and therefore rots unnoticed -- it is only ever built by hand,
+      # when something is already going wrong. Building it on every push is how
+      # it stays buildable for the session that needs it.
+      - name: Build the DIAG variant
+        run: |
+          set -eux
+          make clean
+          make DIAG=1
+          for f in dump_monitor_v*.elf; do
+            cp "$f" "out/${f%.elf}-diag.elf"
+          done
+          ls -l out
+
+      - name: Upload the payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: dump-monitor-${{ github.sha }}
+          path: out/*.elf
+          if-no-files-found: error
+
+  # ON A TAG ONLY. The build above runs on every push; this attaches ITS output
+  # to a GitHub Release, so a release is always the artefact of a run that
+  # passed the checks above rather than a second, separately-compiled one.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built payload
+        uses: actions/download-artifact@v8
+        with:
+          name: dump-monitor-${{ github.sha }}
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # gh is preinstalled on the runner, so this needs no third-party action
+        # and has no Node runtime to be deprecated out from under it.
+        run: |
+          set -eux
+          ls -l dist
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*.elf
