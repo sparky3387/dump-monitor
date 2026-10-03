@@ -2257,9 +2257,22 @@ int main() {
     proc_rootdir_guard_t guard;
 
     // 1. Initialize klog
-    if (__klog_init() == 0) {
+    //
+    // AND SAY WHICH WAY IT WENT, ON STDOUT. Every line this payload emits goes
+    // through LOG_KLOG, gated on this flag, so a failed init turns the whole
+    // process silent -- it runs, serves IPMI and captures dumps while looking
+    // from the outside exactly like a payload that never started. stdout is the
+    // only channel left at this point, and prospero-deploy is still attached to
+    // it, so the deploy itself reports the state of the log channel.
+    const int klog_rc = __klog_init();
+    if (klog_rc == 0) {
         g_klog_enabled = true;
+        printf("[%s v%s] klog: on\n", PROC_NAME, VERSION);
+    } else {
+        printf("[%s v%s] klog: INIT FAILED (rc=%d) -- every log line is "
+               "suppressed from here on\n", PROC_NAME, VERSION, klog_rc);
     }
+    fflush(stdout);
 
     // 2. Set process/thread name
     //    (mdbg_copyout needs no init: it resolves the target's ucred per call.)
