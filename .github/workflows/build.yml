@@ -65,6 +65,22 @@ jobs:
           makepkg -c -f
           sudo pacman --noconfirm -U ./ps5-payload-*.pkg.tar.gz
 
+      # CASE 2 OF deploy.sh's RESOLVER, PROVED ON EVERY PUSH. It builds nothing
+      # and needs no console; it only reports which toolchain it found. This
+      # runner is the only place case 2 (a versioned LLVM 18 directory, which
+      # is what apt gives you) is exercised at all -- the author's machine is
+      # NixOS and always takes case 3. It runs BEFORE the PATH fix-up below, or
+      # it would resolve case 1 and prove nothing.
+      - name: Prove the toolchain resolver finds the versioned LLVM dir
+        run: |
+          set -eux
+          out=$(./deploy.sh --print-toolchain)
+          echo "$out"
+          case "$out" in
+            *"/usr/lib/llvm-18/bin (added to PATH)"*) ;;
+            *) echo "resolver took an unexpected path on this runner" >&2; exit 1 ;;
+          esac
+
       # THIS REPO DOES FIX UP PATH, unlike the sibling library whose build.sh
       # resolves the toolchain itself and is tested by NOT fixing it. Here the
       # build is plain `make`, and the SDK's prospero-* wrappers exec an

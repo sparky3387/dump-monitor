@@ -32,6 +32,7 @@
 #
 # Usage: ./deploy.sh [--host <console>] [--ftp-port 2121] [--elf-port 9021]
 #                    [--quit-file]
+#        ./deploy.sh --print-toolchain    # resolve the toolchain and say which
 #
 # The console address is resolved in this order, first answer wins:
 #   --host, then $PS5_HOST, then [console] host in the config file below.
@@ -78,6 +79,100 @@ ELF="$SRC/dump_monitor_v1.0.elf"
 # Default: hand over over IPMI (STAND_DOWN). `--quit-file` opts back in to the
 # old path for a monitor whose IPMI side never came up.
 SKIP_QUIT=1
+PRINT_TOOLCHAIN=0
+
+# THE TOOLCHAIN IS RESOLVED THREE WAYS, because this builds on NixOS and on an
+# ordinary distro and the two keep LLVM 18 nowhere near each other.
+#
+# What forces the search: the SDK ships SHIMS, NOT A COMPILER. Every entry in
+# the directory `prospero-llvm-config --bindir` reports is a symlink to one
+# shim that dispatches on its own link name and resolves the real tool FROM
+# PATH -- so `clang`, `ld.lld` and `llvm-config` have to be reachable under
+# their UNVERSIONED names or the shim reports the tool missing.
+#
+#   1. already on PATH     -- an entered nix-shell, or a distro set up for it
+#   2. a versioned LLVM 18 -- Debian/Ubuntu install ld.lld-18, with the
+#                             unversioned names only under /usr/lib/llvm-18/bin
+#   3. nix-shell           -- NixOS, where 1 and 2 both find nothing
+#
+# Case 2 is why this is not simply "PATH or nix": this script used to run
+# nix-shell unconditionally, so on an ordinary distro -- even one with clang-18
+# installed -- it failed trying to enter a shell that does not exist there.
+# That reads as a broken build rather than as a missing package.
+#
+# CLANG MUST BE UNWRAPPED on NixOS. The wrapper injects
+# -fno-omit-frame-pointer, which turns libc's hand-written syscall stubs into
+# `push %rbp; ... ret` and makes every one of them return to a stack address.
+# It builds and installs cleanly and dies on hardware; README has the check.
+NIXPKGS=(llvmPackages_18.clang-unwrapped llvmPackages_18.lld llvmPackages_18.llvm)
+LLVM_DIRS=(/usr/lib/llvm-18/bin /usr/local/llvm-18/bin /opt/llvm-18/bin)
+
+resolve_toolchain() {
+    if command -v ld.lld >/dev/null 2>&1; then
+        TOOLCHAIN=path
+        return 0
+    fi
+    local d
+    for d in "${LLVM_DIRS[@]}"; do
+        if [ -x "$d/ld.lld" ]; then
+            PATH="$d:$PATH"; export PATH
+            TOOLCHAIN="$d"
+            return 0
+        fi
+    done
+    # A layout not listed above: derive the directory from the versioned name
+    # apt actually installs. Usable only if the UNVERSIONED name is there too,
+    # because the shim asks for `ld.lld` and nothing else answers it.
+    local v
+    for v in ld.lld-18 ld.lld-19 ld.lld-20; do
+        if command -v "$v" >/dev/null 2>&1; then
+            d="$(dirname "$(command -v "$v")")"
+            if [ -x "$d/ld.lld" ]; then
+                PATH="$d:$PATH"; export PATH
+                TOOLCHAIN="$d"
+                return 0
+            fi
+        fi
+    done
+    if command -v nix-shell >/dev/null 2>&1; then
+        TOOLCHAIN=nix
+        return 0
+    fi
+    return 1
+}
+
+# Name the missing package rather than failing inside a tool the reader did not
+# know was being invoked.
+refuse_toolchain() {
+    echo "!! no LLVM 18 toolchain found, and no nix-shell to build one in." >&2
+    echo >&2
+    echo "   The SDK ships shims, not a compiler: it resolves clang, ld.lld and" >&2
+    echo "   llvm-config from PATH by their UNVERSIONED names." >&2
+    echo >&2
+    echo "   Debian/Ubuntu : apt install clang-18 lld-18" >&2
+    echo "                   then put /usr/lib/llvm-18/bin on PATH" >&2
+    echo "   Arch          : pacman -S clang lld llvm" >&2
+    echo "   Fedora        : dnf install clang lld llvm" >&2
+    echo "   NixOS         : nix-shell -p ${NIXPKGS[*]}" >&2
+    exit 1
+}
+
+say_toolchain() {
+    case "$TOOLCHAIN" in
+        path) echo "==> toolchain: already on PATH ($(command -v ld.lld))" ;;
+        nix)  echo "==> toolchain: nix-shell (llvmPackages_18)" ;;
+        *)    echo "==> toolchain: $TOOLCHAIN (added to PATH)" ;;
+    esac
+}
+
+run_make() {
+    if [ "$TOOLCHAIN" = nix ]; then
+        nix-shell -p "${NIXPKGS[@]}" \
+            --run "PS5_PAYLOAD_SDK='$SDK' make -C '$SRC' $*"
+    else
+        PS5_PAYLOAD_SDK="$SDK" make -C "$SRC" "$@"
+    fi
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -94,9 +189,18 @@ while [ $# -gt 0 ]; do
         --quit-file) SKIP_QUIT=0; shift ;;
         # Accepted so an old invocation does not fail; it is the default now.
         --ipmi-handover) SKIP_QUIT=1; shift ;;
+        # Resolve and report, build nothing, talk to no console. This is what
+        # CI runs to keep the non-nix cases honest without a PS5 attached.
+        --print-toolchain) PRINT_TOOLCHAIN=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+if [ "$PRINT_TOOLCHAIN" = 1 ]; then
+    resolve_toolchain || refuse_toolchain
+    say_toolchain
+    exit 0
+fi
 
 # Anything still unset comes from the config file; only the ports then fall back
 # to the SDK's standard values.
@@ -117,9 +221,11 @@ if [ -z "$HOST" ]; then
     exit 2
 fi
 
+resolve_toolchain || refuse_toolchain
+say_toolchain
+
 echo "==> building"
-nix-shell -p llvmPackages_18.clang-unwrapped llvmPackages_18.lld llvmPackages_18.llvm \
-    --run "PS5_PAYLOAD_SDK=$SDK make -C '$SRC'"
+run_make
 
 # THE PRIMARY STOP AGAIN, not a legacy step. It was demoted on 2026-08-14 when
 # the IPMI handover landed, and un-demoted on 2026-08-19 when that handover was

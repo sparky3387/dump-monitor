@@ -3,18 +3,69 @@
 A resident PS5 payload that captures crash dumps before the OS deletes them, and
 records the GOT of every module the crashing game had mapped.
 
-Built against [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk):
+## Building
+
+Needs [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) and LLVM 18.
 
 ```
-PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk make
-./deploy.sh --host <console>    # build, hand over, deploy
+./deploy.sh --print-toolchain                 # resolve it, say which, build nothing
+./deploy.sh --host <console>                  # resolve, build, hand over, deploy
+PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk make     # build only, toolchain already on PATH
 ```
 
 The SDK's "binary distribution" is not a self-contained toolchain: it ships
-headers, CRT objects and shell wrappers, and drives *your* clang/lld (any of
-llvm-config-15 .. -22). The only native host binary in it is `prospero-nid`.
+headers, CRT objects and shell wrappers that drive *your* clang/lld (any of
+llvm-config-15 .. -22), resolving them from `PATH` under their **unversioned**
+names. The only native host binary in it is `prospero-nid`. That resolution is
+the whole reason the next three sections differ.
 
-### Building on NixOS
+`deploy.sh` searches three ways, prints which one it took, and refuses while
+naming the package to install when none answers:
+
+| | where | typical of |
+|---|---|---|
+| 1 | already on `PATH` | Arch, Fedora, an entered `nix-shell` |
+| 2 | a versioned LLVM 18 directory — `/usr/lib/llvm-18/bin`, or derived from `ld.lld-18` | Debian, Ubuntu |
+| 3 | `nix-shell -p llvmPackages_18...` | NixOS |
+
+Case 2 only counts if the **unversioned** name is in that directory too: the
+SDK's shim asks for `ld.lld`, and `ld.lld-18` does not answer it.
+
+### Debian / Ubuntu
+
+This is the path CI runs on every push (`ubuntu-24.04`), so it stays true.
+
+```sh
+# the payload itself
+sudo apt install build-essential clang-18 lld-18
+
+# and the SDK, if you do not have one
+sudo apt install cmake curl libarchive-tools makepkg pacman-package-manager \
+                 pkg-config python3
+git clone https://github.com/ps5-payload-dev/pacbrew-repo
+cd pacbrew-repo/sdk
+makepkg -c -f
+sudo pacman -U ./ps5-payload-*.pkg.tar.gz        # installs /opt/ps5-payload-sdk
+```
+
+apt installs `ld.lld-18`, with the unversioned names only under
+`/usr/lib/llvm-18/bin` — case 2 above finds that by itself. For a bare `make`,
+put it on `PATH` first.
+
+The pacbrew `libcxx` package is not needed: this payload is built
+`-fno-exceptions -fno-rtti` and linked with `$(CC)` precisely so it needs no C++
+runtime. If a link ever asks for `-lc++`, something has started pulling in the
+STL — fix that rather than installing the package to hide it.
+
+### Arch / Fedora
+
+`pacman -S clang lld llvm` / `dnf install clang lld llvm`. Both ship the
+unversioned names on `PATH`, so case 1 applies and nothing else is needed.
+**Untested** — unlike the Debian and NixOS paths, no CI runner and no machine
+here exercises it; if it bites, the `--print-toolchain` line is the first thing
+to read.
+
+### NixOS
 
 Three things bite, none of them obvious:
 
@@ -44,7 +95,7 @@ nix-shell -p llvmPackages_18.clang-unwrapped llvmPackages_18.lld \
              llvmPackages_18.llvm gnumake bash
 
 D=/opt/ps5-payload-sdk
-cd ~/source/sdk
+cd /path/to/ps5-payload-dev/sdk
 make -j1 CC=$(command -v clang) LD=$(command -v ld.lld) \
          AR=$(command -v llvm-ar) DESTDIR=$D install
 
@@ -102,11 +153,12 @@ exit 1
 EOF
 chmod +x $D/bin/prospero-llvm-config
 
-PS5_PAYLOAD_SDK=$D make -C ~/source/dump-monitor
+PS5_PAYLOAD_SDK=$D make -C /path/to/dump-monitor
 ```
 
 Build from inside that same `nix-shell` every time — the shims need the
 toolchain on `PATH`. They report which tool is missing if it is not.
+`./deploy.sh` enters one for you (case 3), so it works from a plain shell.
 
 Use `-j1` for the SDK: a parallel build can report success while the crt has
 actually failed.
