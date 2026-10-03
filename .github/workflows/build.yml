@@ -134,6 +134,19 @@ jobs:
             cp "$f" "out/${f%.elf}-diag.elf"
           done
           ls -l out
+          # AND PROVE THE SWITCH DID SOMETHING. The two ELFs being identical is
+          # how this was caught: the Makefile defined -DCDM_DIAG for a month
+          # after the source had been renamed to test DM_DIAG, so `make DIAG=1`
+          # compiled the same binary and nothing said so. Building both is
+          # worthless without comparing them.
+          for d in out/*-diag.elf; do
+            f="${d%-diag.elf}.elf"
+            if cmp -s "$f" "$d"; then
+              echo "DIAG=1 produced a byte-identical ELF -- the switch is dead" >&2
+              exit 1
+            fi
+            echo "DIAG differs: $(stat -c%s "$f") vs $(stat -c%s "$d") bytes"
+          done
 
       - name: Upload the payload
         uses: actions/upload-artifact@v7

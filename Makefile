@@ -30,7 +30,7 @@ CXXFLAGS += -Wall -Werror -g -std=gnu++17 -fno-exceptions -fno-rtti \
 # inner quotes off -DVERSION='"$(VERSION)"' and the string turns into a double.
 DIAG ?= 0
 ifeq ($(DIAG),1)
- CXXFLAGS += -DCDM_DIAG
+ CXXFLAGS += -DDM_DIAG
 endif
 
 # The ELF depends on the value of DIAG, not just on the sources. Without this,
