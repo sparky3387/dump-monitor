@@ -155,6 +155,62 @@ jobs:
           path: out/*.elf
           if-no-files-found: error
 
+  # EVERY PUSH TO main GETS A DOWNLOADABLE BUILD, at one moving tag. The build
+  # job's artifact is retrievable only with a GitHub login and expires; a
+  # release asset is a plain URL that keeps working, which is what someone
+  # testing a payload on a console actually needs.
+  #
+  # It is a PRERELEASE, deliberately. Nothing in CI can tell whether a payload
+  # runs on hardware -- that takes a console, and `./deploy.sh --elf <file>`
+  # against a downloaded asset is how it is checked. So this publishes
+  # "built and self-checked", never "known good", and the notes say so.
+  #
+  # The tag is deleted and recreated rather than left behind, so `latest`
+  # always means this commit and there is one rolling entry instead of a
+  # release per push. Versioned releases are the `release` job below, on a real
+  # tag, and those are immutable.
+  rolling:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built payload
+        uses: actions/download-artifact@v8
+        with:
+          name: dump-monitor-${{ github.sha }}
+          path: dist
+
+      - name: Refresh the rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          ls -l dist
+          # `|| true`: there is nothing to delete on the first run, and a
+          # missing release is not a failure here.
+          gh release delete latest --repo "${{ github.repository }}" \
+            --yes --cleanup-tag || true
+          gh release create latest \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "latest build (${GITHUB_SHA:0:7})" \
+            --prerelease \
+            --notes "Automatic build of ${GITHUB_SHA:0:7} on $(date -u +%Y-%m-%dT%H:%MZ).
+
+          Built and self-checked by CI: the SDK's syscall stubs are verified, and
+          the DIAG variant is confirmed to differ from the plain one. **Not
+          tested on a console** -- CI has no hardware. To test one:
+
+          \`\`\`
+          ./deploy.sh --elf dump_monitor_v1.0.elf --host <console>
+          \`\`\`
+
+          \`-diag\` adds the one-shot vm_map / module-base dump. For a release
+          with a version behind it, use a tagged one." \
+            dist/*.elf
+
   # ON A TAG ONLY. The build above runs on every push; this attaches ITS output
   # to a GitHub Release, so a release is always the artefact of a run that
   # passed the checks above rather than a second, separately-compiled one.
